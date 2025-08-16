@@ -107,9 +107,5 @@ def plot_combined(bg_res, phase_res, audio_path):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
-# ========= Run both =========
-if __name__ == "__main__":
-    audio_path = "speaker31_tampered.wav"  # <-- your file
-    bg_res = detect_splices_by_background(audio_path)
-    phase_res = detect_phase_mismatch(audio_path)
-    plot_combined(bg_res, phase_res, audio_path)
+
+
