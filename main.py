@@ -123,4 +123,8 @@ async def diarization_endpoint(file: UploadFile = File(...)):
         
         # Process diarization
         results = run_diarization(temp_path)
+        return JSONResponse(content=results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
