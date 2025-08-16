@@ -108,3 +108,19 @@ async def detect_temporal_inconsistency_endpoint(file: UploadFile = File(...)):
         if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
         raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
+
+# Diarization Endpoint
+@app.post("/diarization/")
+async def diarization_endpoint(file: UploadFile = File(...)):
+    try:
+        if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+            temp_audio.write(await file.read())
+            temp_path = temp_audio.name
+
+        
+        # Process diarization
+        results = run_diarization(temp_path)
+
