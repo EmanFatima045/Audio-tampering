@@ -127,4 +127,24 @@ async def diarization_endpoint(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/metadata/")
+async def get_audio_metadata(file: UploadFile = File(...)):
+    # Save uploaded file temporarily
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        content = await file.read()
+        temp_file.write(content)
+        temp_path = temp_file.name
+    
+    try:
+        # Extract metadata
+        result = extract_audio_metadata(temp_path)
+        
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        return result["metadata"]
+    
+    finally:
+        # Clean up temp file
+        os.unlink(temp_path)
 
