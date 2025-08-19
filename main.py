@@ -89,14 +89,37 @@ async def detect_temporal_inconsistency_endpoint(file: UploadFile = File(...)):
             
             plt.close()  # Close the plot to free memory
             
-            # Prepare console-like output
-            console_output = f"Background splice times: {bg_results['times']}\n"
-            console_output += f"Phase mismatch times: {phase_results['times']}"
+            # ========== REPLACE THIS SECTION ==========
+            # OLD CODE (remove this):
+            # # Prepare console-like output
+            # console_output = f"Background splice times: {bg_results['times']}\n"
+            # console_output += f"Phase mismatch times: {phase_results['times']}"
+            # 
+            # return JSONResponse({
+            #     "text_output": console_output,
+            #     "graph_base64": img_base64
+            # })
+            
+            # NEW CODE (add this instead):
+            # Convert numpy arrays to lists for JSON serialization
+            background_splice_times = bg_results['times'].tolist() if len(bg_results['times']) > 0 else []
+            phase_mismatch_times = phase_results['times'].tolist() if len(phase_results['times']) > 0 else []
+            
+            # Format times to 2 decimal places
+            background_splice_times = [round(t, 2) for t in background_splice_times]
+            phase_mismatch_times = [round(t, 2) for t in phase_mismatch_times]
+            
+            # Prepare console-like output (for backward compatibility)
+            console_output = f"Background splice times: {background_splice_times}\n"
+            console_output += f"Phase mismatch times: {phase_mismatch_times}"
             
             return JSONResponse({
-                "text_output": console_output,
-                "graph_base64": img_base64
+                "background_splice_times": background_splice_times,
+                "phase_mismatch_times": phase_mismatch_times,
+                "graph_base64": img_base64,
+                "text_output": console_output  # Keep for backward compatibility
             })
+            # ========== END OF REPLACEMENT ==========
             
         finally:
             # Clean up temporary file
@@ -147,4 +170,5 @@ async def get_audio_metadata(file: UploadFile = File(...)):
     finally:
         # Clean up temp file
         os.unlink(temp_path)
+
 
