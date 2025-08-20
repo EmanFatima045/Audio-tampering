@@ -103,8 +103,6 @@ async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
                     plt.close()
                     buf.seek(0)
                     graph_base64 = base64.b64encode(buf.read()).decode("utf-8")
-                else:
-                    print("Matplotlib not available, skipping graph generation")
             except Exception as plot_error:
                 print(f"Error generating plot: {plot_error}")
                 graph_base64 = None
@@ -116,7 +114,6 @@ async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
                 "phase_splices": phase_splices,
                 "combined_splices": combined_splices,
                 "graph": graph_base64,
-                "message": "Analysis completed successfully" + (" (graph not available)" if graph_base64 is None else "")
             }
 
         except Exception as e:
@@ -167,3 +164,4 @@ async def get_audio_metadata(file: UploadFile = File(...)):
     finally:
         # Clean up temp file
         os.unlink(temp_path)
+
