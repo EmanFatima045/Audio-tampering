@@ -57,74 +57,62 @@ async def sentiment_endpoint(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/temporal_inconsistency/")
-async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
+@app.post("/detect-temporal-inconsistency/")
+async def detect_temporal_inconsistency_endpoint(file: UploadFile = File(...)):
     try:
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
             raise HTTPException(status_code=400, detail="Unsupported file format")
-
-        # Save uploaded file to temp location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            content = await file.read()
-            tmp.write(content)
-            temp_path = tmp.name
-
+        
+        # Read the uploaded file
+        file_bytes = await file.read()
+        
+        # Create a temporary file to save the audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            temp_file.write(file_bytes)
+            temp_file_path = temp_file.name
+        
         try:
-            # Run the analysis
-            bg_res, phase_res, high_confidence_splices = analyze_audio_splices(temp_path)
-
-            # Convert background detections
-            background_splices = [
-                {"time": float(time), "confidence": float(conf)}
-                for time, conf in zip(bg_res['times'], bg_res.get('confidence', []))
-            ]
-
-            # Convert phase detections
-            phase_splices = [
-                {"time": float(time), "confidence": float(conf)}
-                for time, conf in zip(phase_res['times'], phase_res.get('confidence', []))
-            ]
-
-            # Combined detections
-            combined_splices = [
-                {"time": float(splice['time']), 
-                 "confidence": float(splice['confidence']), 
-                 "methods": splice['methods']}
-                for splice in high_confidence_splices
-            ]
-
-            # Create plot in memory (with error handling)
-            graph_base64 = None
-            try:
-                if plt is not None:
-                    buf = BytesIO()
-                    plot_combined_analysis(bg_res, phase_res, high_confidence_splices, temp_path)
-                    plt.savefig(buf, format="png", bbox_inches='tight')
-                    plt.close()
-                    buf.seek(0)
-                    graph_base64 = base64.b64encode(buf.read()).decode("utf-8")
-            except Exception as plot_error:
-                print(f"Error generating plot: {plot_error}")
-                graph_base64 = None
-
-            # Build JSON response
-            return {
-                "file": file.filename,
-                "background_splices": background_splices,
-                "phase_splices": phase_splices,
-                "combined_splices": combined_splices,
-                "graph": graph_base64,
-            }
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+            # Perform background continuity detection
+            bg_results = detect_splices_by_background(temp_file_path)
+            
+            # Perform phase mismatch detection
+            phase_results = detect_phase_mismatch(temp_file_path)
+            
+            # Generate the combined plot
+            plt.ioff()  # Turn off interactive mode
+            plot_combined(bg_results, phase_results, file.filename)
+            
+            # Save plot to bytes
+            img_buffer = io.BytesIO()
+            plt.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+            img_buffer.seek(0)
+            
+            # Convert to base64 for JSON response
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+            
+            plt.close()  # Close the plot to free memory
+            
+            # Prepare console-like output
+            console_output = f"Background splice times: {bg_results['times']}\n"
+            console_output += f"Phase mismatch times: {phase_results['times']}"
+            
+            return JSONResponse({
+                "text_output": console_output,
+                "graph_base64": img_base64
+            })
+            
         finally:
-            # Clean up temp file
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
+            # Clean up temporary file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+                
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Clean up temporary file in case of error
+        if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+        raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
+
+
     
 # Diarization Endpoint
 @app.post("/diarization/")
@@ -164,4 +152,5 @@ async def get_audio_metadata(file: UploadFile = File(...)):
     finally:
         # Clean up temp file
         os.unlink(temp_path)
+
 
