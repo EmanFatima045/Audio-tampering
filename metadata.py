@@ -13,7 +13,7 @@ except ImportError:
     raise ImportError("Required libraries: pip install mutagen librosa numpy scipy")
 
 
-def extract_audio_metadata(filepath: str) -> dict:
+def extract_audio_metadata(filepath: str, original_filename: str = None, original_timestamps: dict = None) -> dict:
     """Comprehensive Audio Metadata Extractor - Uncover every detail about your audio files"""
     
     def format_duration(seconds):
@@ -378,16 +378,27 @@ def extract_audio_metadata(filepath: str) -> dict:
         
         stat = file_path.stat()
         file_size = stat.st_size
-        created_time = stat.st_ctime
-        modified_time = stat.st_mtime
-        access_time = stat.st_atime
+        
+        # Use ORIGINAL timestamps if provided, otherwise fall back to temp file timestamps
+        if original_timestamps:
+            created_time = original_timestamps.get('created') or original_timestamps.get('modified')
+            modified_time = original_timestamps.get('modified')
+            access_time = original_timestamps.get('modified')  # Use modified as access time fallback
+        else:
+            created_time = stat.st_ctime
+            modified_time = stat.st_mtime
+            access_time = stat.st_atime
+        
+        # Use original filename for display if provided
+        display_name = original_filename if original_filename else file_path.name
+        display_path = Path(display_name)
         
         # Audio file analysis
         audio_file = File(filepath)
         if audio_file is None:
             return {
                 "success": False,
-                "error": f"Unsupported or corrupted audio file: {filepath}",
+                "error": f"Unsupported or corrupted audio file: {display_name}",
                 "metadata": None
             }
         
@@ -402,21 +413,21 @@ def extract_audio_metadata(filepath: str) -> dict:
         # Build comprehensive metadata
         metadata = {
             "File System Information": {
-                "File Name": file_path.name,
-                "Full Path": str(file_path.absolute()),
-                "File Extension": file_path.suffix.upper().replace('.', '') or 'No Extension',
+                "File Name": display_name,
+                "Full Path": display_name if original_filename else str(file_path.absolute()),
+                "File Extension": display_path.suffix.upper().replace('.', '') or 'No Extension',
                 "File Size": format_filesize(file_size),
                 "Raw Size (Bytes)": f"{file_size:,} bytes",
                 "Created": format_timestamp(created_time),
                 "Last Modified": format_timestamp(modified_time),
                 "Last Accessed": format_timestamp(access_time),
-                "File Permissions": oct(stat.st_mode)[-3:],
+                "File Permissions": oct(stat.st_mode)[-3:] if not original_filename else "Upload Context",
             },
             
             "Audio Properties": {
                 "Duration": format_duration(duration_seconds),
                 "Precise Duration": f"{duration_seconds:.3f} seconds" if duration_seconds else "Unknown",
-                "Audio Type": detect_audio_type_advanced(filepath, duration_seconds, bitrate, channels, sample_rate, file_size),
+                "Audio Type": detect_audio_type_advanced(display_name, duration_seconds, bitrate, channels, sample_rate, file_size),
                 "Bitrate": format_bitrate(bitrate),
                 "Sample Rate": f"{sample_rate:,} Hz" if sample_rate else "Unknown",
                 "Channels": f"{channels} ({'Mono' if channels == 1 else 'Stereo' if channels == 2 else f'{channels}-Channel Surround'})" if channels else "Unknown",

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi import Form
 
 import base64
 import tempfile
@@ -9,6 +10,7 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
+import uuid
 
 from transcribe import transcribe_audio
 from sentiment_analysis import get_sentiment
@@ -28,17 +30,21 @@ app.add_middleware(
 )
 
 @app.post("/transcribe/")
-async def transcribe_endpoint(file: UploadFile = File(...)):
+async def transcribe(file: UploadFile = File(...)):
     try:
+        # Check file type (basic)
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
-            raise HTTPException(status_code=400, detail="Unsupported file format")
+            raise HTTPException(status_code=400, detail="Unsupported file type. Please upload an audio file.")
 
         file_bytes = await file.read()
         transcription = transcribe_audio(file_bytes, file.filename)
-
         return {"transcription": transcription}
+
+    except HTTPException as e:
+        raise e  # re-raise FastAPI handled error
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
 @app.post("/sentiment/")
@@ -47,30 +53,59 @@ async def sentiment_endpoint(file: UploadFile = File(...)):
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
+        # Read file once
         file_bytes = await file.read()
-        transcription = transcribe_audio(file_bytes, file.filename)
-        sentiment = get_sentiment(transcription)
 
-        return {
-            "transcription": transcription,
-            "sentiment": sentiment
-        }
+        # Optional: save to temp if you need a physical file
+        with tempfile.NamedTemporaryFile(delete=True, suffix=Path(file.filename).suffix) as tmp:
+            tmp.write(file_bytes)
+            temp_path = tmp.name
+
+        try:
+            # Run transcription on bytes
+            transcription = transcribe_audio(file_bytes, file.filename)
+
+            # Sentiment analysis on transcription
+            sentiment = get_sentiment(transcription)
+
+            return {
+                "sentiment": sentiment
+            }
+
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Sentiment analysis failed: {str(e)}")
+
 
 @app.post("/gender/")
-async def gender_endpoint(file: UploadFile = File(...)):
+async def detect_gender(file: UploadFile = File(...)):
     try:
+        # Check file type
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
-            raise HTTPException(status_code=400, detail="Unsupported file format")
+            raise HTTPException(status_code=400, detail="Unsupported file type. Please upload an audio file.")
 
-        file_bytes = await file.read()
-        gender = process_audio(file_bytes, file.filename)
+        # Save temp file
+        temp_id = str(uuid.uuid4())
+        temp_path = f"{temp_id}.wav"
+        with open(temp_path, "wb") as f:
+            f.write(await file.read())
 
-        return {"gender": gender}
+        # Process audio
+        result = process_audio(temp_path)
+
+        # Clean up
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        return result
+
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @app.post("/temporal_inconsistency/")
@@ -80,7 +115,7 @@ async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
         # Save uploaded file to temp location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as tmp:
             content = await file.read()
             tmp.write(content)
             temp_path = tmp.name
@@ -143,7 +178,7 @@ async def diarization_endpoint(file: UploadFile = File(...)):
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as temp_audio:
             temp_audio.write(await file.read())
             temp_path = temp_audio.name
 
@@ -155,54 +190,67 @@ async def diarization_endpoint(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/metadata/")
-async def comprehensive_metadata_endpoint(file: UploadFile = File(...)):
+async def comprehensive_metadata_endpoint(
+    file: UploadFile = File(...),
+    original_modified: str = Form(None),
+    original_created: str = Form(None)
+):
     try:
         if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff")):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        # Save uploaded file to temp location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete= True, suffix=Path(file.filename).suffix) as tmp:
             content = await file.read()
             tmp.write(content)
             temp_path = tmp.name
 
         try:
-            # Run the comprehensive metadata analysis
-            result = extract_audio_metadata(temp_path)
-            
+            # Parse timestamps
+            original_timestamps = {}
+            if original_modified:
+                try:
+                    if original_modified.isdigit():
+                        original_timestamps['modified'] = int(original_modified) / 1000
+                    else:
+                        dt = datetime.fromisoformat(original_modified.replace('Z', '+00:00'))
+                        original_timestamps['modified'] = dt.timestamp()
+                except:
+                    original_timestamps['modified'] = None
+            if original_created:
+                try:
+                    if original_created.isdigit():
+                        original_timestamps['created'] = int(original_created) / 1000
+                    else:
+                        dt = datetime.fromisoformat(original_created.replace('Z', '+00:00'))
+                        original_timestamps['created'] = dt.timestamp()
+                except:
+                    original_timestamps['created'] = None
+
+            # Run metadata extractor
+            result = extract_audio_metadata(
+                filepath=temp_path,
+                original_filename=file.filename,
+                original_timestamps=original_timestamps if original_timestamps else None
+            )
+
             if not result["success"]:
                 raise HTTPException(status_code=400, detail=result["error"])
-            
-            # Prepare the response data
-            metadata = result["metadata"]
-            
-            # Convert any non-serializable data to strings
-            def make_json_serializable(obj):
-                if isinstance(obj, dict):
-                    return {key: make_json_serializable(value) for key, value in obj.items()}
-                elif isinstance(obj, (list, tuple)):
-                    return [make_json_serializable(item) for item in obj]
-                elif isinstance(obj, (int, float, str, bool)) or obj is None:
-                    return obj
-                else:
-                    return str(obj)
-            
-            serializable_metadata = make_json_serializable(metadata)
-            
+
             return {
                 "success": True,
                 "filename": file.filename,
                 "analysis_timestamp": datetime.now().isoformat(),
-                "metadata": serializable_metadata
+                "original_timestamps_received": {
+                    "modified": original_modified,
+                    "created": original_created
+                } if (original_modified or original_created) else None,
+                "metadata": result["metadata"]
             }
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Metadata analysis error: {str(e)}")
-        
         finally:
-            # Clean up temp file
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Metadata analysis error: {str(e)}")
