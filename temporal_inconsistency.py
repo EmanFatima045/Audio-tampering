@@ -1,11 +1,12 @@
 import numpy as np
 import librosa
-import librosa.display
 import matplotlib.pyplot as plt
 import pandas as pd
 import scipy.ndimage
 from scipy.signal import find_peaks
 from scipy import stats
+import base64
+from io import BytesIO
 
 # ========= Helper Functions =========
 def frame_params(sr, frame_ms=25, hop_ms=10):
@@ -13,16 +14,7 @@ def frame_params(sr, frame_ms=25, hop_ms=10):
     hop_len = int(sr * hop_ms / 1000)
     return frame_len, hop_len, frame_len
 
-def print_detection_summary(method_name, peaks, times, threshold_val=None):
-    """Print formatted detection results to console"""
-    print(f"{method_name.upper()} DETECTION RESULTS")
-    print(f"{'='*60}")
-    
-    if len(peaks) == 0:
-        print("No splices detected using this method")
-        return
-    
-    print(f"Found {len(peaks)} potential splice(s)")
+# Removed print_detection_summary function to eliminate console output
 
 # ========= Enhanced Background Continuity Detection =========
 def detect_splices_by_background(audio_path, frame_ms=25, hop_ms=10, bg_percentile=20,
@@ -31,9 +23,7 @@ def detect_splices_by_background(audio_path, frame_ms=25, hop_ms=10, bg_percenti
                                  min_prominence=0.1, min_distance=20):
     """Enhanced background continuity detection with better peak finding"""
     
-    print(f"\nLoading audio: {audio_path}")
     y, sr = librosa.load(audio_path, sr=None)
-    print(f"Sample rate: {sr} Hz, Duration: {len(y)/sr:.2f}s")
     
     frame_len, hop_len, n_fft = frame_params(sr, frame_ms=frame_ms, hop_ms=hop_ms)
 
@@ -71,8 +61,6 @@ def detect_splices_by_background(audio_path, frame_ms=25, hop_ms=10, bg_percenti
     
     # Calculate confidence scores
     confidence_scores = smoothed[peaks] - threshold.values[peaks]
-    
-    print_detection_summary("Background Continuity", peaks, times)
     
     return {
         "sr": sr,
@@ -134,8 +122,6 @@ def detect_phase_mismatch(audio_path, frame_ms=25, hop_ms=10, z_thresh=2.8,
     # Calculate confidence scores
     confidence_scores = norm_diff[peaks - 1] if len(peaks) > 0 else []
     
-    print_detection_summary("Phase Mismatch", peaks, times)
-    
     return {
         "sr": sr,
         "norm_diff": norm_diff,
@@ -149,10 +135,6 @@ def detect_phase_mismatch(audio_path, frame_ms=25, hop_ms=10, z_thresh=2.8,
 # ========= Combined Analysis (Background + Phase Only) =========
 def analyze_audio_splices(audio_path, confidence_threshold=0.6):
     """Comprehensive splice detection analysis using background and phase methods"""
-    
-    print(f"\nCOMPREHENSIVE AUDIO SPLICE ANALYSIS")
-    print(f"{'='*80}")
-    print(f"Audio File: {audio_path}")
     
     # Run detection methods (removing spectral analysis)
     bg_res = detect_splices_by_background(audio_path)
@@ -195,14 +177,6 @@ def analyze_audio_splices(audio_path, confidence_threshold=0.6):
                 current_group = [detection]
         grouped_detections.append(current_group)
     
-    # Print final summary
-    print(f"\nFINAL SPLICE DETECTION SUMMARY")
-    print(f"{'='*80}")
-    
-    if not grouped_detections:
-        print("No audio splices detected with high confidence")
-        return bg_res, phase_res, []
-    
     high_confidence_splices = []
     
     for group in grouped_detections:
@@ -222,14 +196,10 @@ def analyze_audio_splices(audio_path, confidence_threshold=0.6):
                 'methods': list(set(methods))
             })
     
-    print(f"HIGH CONFIDENCE SPLICES DETECTED: {len(high_confidence_splices)}")
-    for i, splice in enumerate(high_confidence_splices):
-        print(f"   #{i+1}: {splice['time']:.2f}s (confidence: {splice['confidence']:.3f})")
-    
     return bg_res, phase_res, high_confidence_splices
 
-def plot_combined_analysis(bg_res, phase_res, high_confidence_splices, audio_path):
-    """Enhanced plotting with background and phase detection methods"""
+def plot_combined_analysis_base64(bg_res, phase_res, high_confidence_splices, audio_path):
+    """Enhanced plotting with background and phase detection methods - returns base64"""
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
     # ===== Background continuity subplot =====
@@ -276,24 +246,12 @@ def plot_combined_analysis(bg_res, phase_res, high_confidence_splices, audio_pat
     
     plt.suptitle(f"Audio Splice Detection Analysis: {audio_path}", fontsize=16, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.show()
-
-# ========= Main Execution =========
-if __name__ == "__main__":
-    audio_path = "speaker31_tampered.wav"  # Update this path
     
-    try:
-        # Run comprehensive analysis
-        bg_res, phase_res, high_confidence_splices = analyze_audio_splices(
-            audio_path, confidence_threshold=0.6)
-        
-        # Plot results
-        plot_combined_analysis(bg_res, phase_res, high_confidence_splices, audio_path)
-        
-    except FileNotFoundError:
-        print(f"Error: Audio file '{audio_path}' not found!")
-        print("Please update the 'audio_path' variable with the correct file path.")
-    except Exception as e:
-        print(f"Error occurred: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    # Convert to base64 instead of showing
+    buf = BytesIO()
+    plt.savefig(buf, format="png", bbox_inches='tight')
+    plt.close()  # Important: close the figure to free memory
+    buf.seek(0)
+    graph_base64 = base64.b64encode(buf.read()).decode("utf-8")
+    
+    return graph_base64
