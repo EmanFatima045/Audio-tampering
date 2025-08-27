@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import Form
+from fastapi.staticfiles import StaticFiles
 
 import base64
 import tempfile
@@ -16,7 +17,8 @@ from transcribe import transcribe_audio
 from sentiment_analysis import get_sentiment
 from temporal_inconsistency import detect_splices_by_background, detect_phase_mismatch, analyze_audio_splices, plot_combined_analysis_base64
 from metadata import extract_audio_metadata
-from diarization import run_diarization
+# Use the diarization implementation that also writes per-segment files
+from diarization_gender import run_diarization
 from gender_detection import process_audio
 
 app = FastAPI()
@@ -57,7 +59,7 @@ async def sentiment_endpoint(file: UploadFile = File(...)):
         file_bytes = await file.read()
 
         # Optional: save to temp if you need a physical file
-        with tempfile.NamedTemporaryFile(delete=True, suffix=Path(file.filename).suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
             tmp.write(file_bytes)
             temp_path = tmp.name
 
@@ -115,7 +117,7 @@ async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
         # Save uploaded file to temp location
-        with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             content = await file.read()
             tmp.write(content)
             temp_path = tmp.name
@@ -172,20 +174,36 @@ async def temporal_inconsistency_endpoint(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
     
 # Diarization Endpoint
+os.makedirs("static/segments", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 @app.post("/diarization/")
 async def diarization_endpoint(file: UploadFile = File(...)):
     try:
-        if not file.filename.endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
+        if not file.filename.lower().endswith((".wav", ".mp3", ".m4a", ".flac", ".ogg")):
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as temp_audio:
+        # Keep extension for ffmpeg friendliness
+        suffix = os.path.splitext(file.filename)[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_audio:
             temp_audio.write(await file.read())
             temp_path = temp_audio.name
 
-        
-        # Process diarization
-        results = run_diarization(temp_path)
+        try:
+            results = run_diarization(
+                temp_path,
+                segments_dir="static/segments",
+                public_base="/static/segments"
+            )
+        finally:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
         return JSONResponse(content=results)
+    except HTTPException:
+         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -200,7 +218,7 @@ async def comprehensive_metadata_endpoint(
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
         # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete= True, suffix=Path(file.filename).suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete= False, suffix=Path(file.filename).suffix) as tmp:
             content = await file.read()
             tmp.write(content)
             temp_path = tmp.name

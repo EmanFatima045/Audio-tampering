@@ -1,122 +1,141 @@
 import os
+import uuid
+import subprocess
+from typing import List, Tuple, Dict, Any
+
+import numpy as np
 import torch
-import librosa
 import torchaudio
 import soundfile as sf
-import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from speechbrain.inference.speaker import SpeakerRecognition
-from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2FeatureExtractor
 
-# Pretrained models
+# Speaker embedding model
 diarization_model = SpeakerRecognition.from_hparams(
     source="speechbrain/spkrec-ecapa-voxceleb",
     savedir="pretrained_models/spkrec-ecapa-voxceleb"
 )
 
-gender_model_name = "prithivMLmods/Common-Voice-Gender-Detection"
-gender_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(gender_model_name)
-gender_model = Wav2Vec2ForSequenceClassification.from_pretrained(gender_model_name)
-id2label = {"0": "Female", "1": "Male"}
-
-
-def convert_to_mono_16k(input_path: str, output_path: str = "converted_audio.wav") -> str:
-    import subprocess
-
-    # Ensure input file exists
+def convert_to_mono_16k(input_path: str, output_path: str) -> str:
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"File not found: {input_path}")
 
-    #  output to mono 16kHz WAV using ffmpeg
-    command = [
-        "ffmpeg",  # make sure ffmpeg is in PATH or give full path here
-        "-y",  # overwrite output file if exists
+    cmd = [
+        "ffmpeg",
+        "-y",
         "-i", input_path,
-        "-ac", "1",           # mono
-        "-ar", "16000",       # 16kHz
-        "-vn",                # no video
+        "-ac", "1",
+        "-ar", "16000",
+        "-vn",
         output_path
     ]
-
     try:
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"ffmpeg failed: {e.stderr.decode()}")
-
     return output_path
 
+def _chunk_signal(signal: torch.Tensor, sr: int, chunk_seconds: float = 1.0) -> Tuple[List[torch.Tensor], List[Tuple[int, int]], float]:
+    chunk_len = int(sr * chunk_seconds)
+    total_len = signal.shape[1]
+    chunks: List[torch.Tensor] = []
+    frame_spans: List[Tuple[int, int]] = []
+    for i in range(0, total_len, chunk_len):
+        end = i + chunk_len
+        if end > total_len:
+            break
+        chunks.append(signal[:, i:end])
+        frame_spans.append((i, end))
+    return chunks, frame_spans, chunk_seconds
 
+def _merge_consecutive(labels: np.ndarray, frame_spans: List[Tuple[int, int]]) -> List[Tuple[int, int, int]]:
+    merged: List[Tuple[int, int, int]] = []
+    if len(labels) == 0:
+        return merged
+    cur_label = int(labels[0])
+    cur_start = frame_spans[0][0]
+    cur_end = frame_spans[0][1]
+    for idx in range(1, len(labels)):
+        if int(labels[idx]) == cur_label and frame_spans[idx][0] == cur_end:
+            cur_end = frame_spans[idx][1]
+        else:
+            merged.append((cur_label, cur_start, cur_end))
+            cur_label = int(labels[idx])
+            cur_start = frame_spans[idx][0]
+            cur_end = frame_spans[idx][1]
+    merged.append((cur_label, cur_start, cur_end))
+    return merged
 
+def run_diarization(file_path: str, segments_dir: str = "static/segments", public_base: str = "/static/segments") -> dict:
+    os.makedirs(segments_dir, exist_ok=True)
 
-def detect_gender(audio_chunk: torch.Tensor) -> str:
-    tmp_path = "tmp_chunk.wav"
-    sf.write(tmp_path, audio_chunk.squeeze().numpy(), 16000)
+    converted_tmp = os.path.join(segments_dir, f"tmp_{uuid.uuid4().hex}.wav")
+    converted = convert_to_mono_16k(file_path, output_path=converted_tmp)
+    signal, sr = torchaudio.load(converted)
 
-    speech, sr = librosa.load(tmp_path, sr=16000)
-    inputs = gender_feature_extractor(
-        speech, sampling_rate=sr, padding=True, return_tensors="pt"
-    )
-    with torch.no_grad():
-        logits = gender_model(**inputs).logits
-        probs = torch.nn.functional.softmax(logits, dim=1).squeeze()
-        predicted_label = torch.argmax(probs).item()
-    os.remove(tmp_path)
-    return id2label[str(predicted_label)]
+    try:
+        if signal.shape[0] > 1:
+            signal = signal.mean(dim=0, keepdim=True)
+        if sr != 16000:
+            raise ValueError("Audio must be 16kHz mono after conversion")
 
+        chunks, frame_spans, _ = _chunk_signal(signal, sr, chunk_seconds=1.0)
+        if len(chunks) == 0:
+            return {"estimated_speakers": 0, "segments": []}
 
-def run_diarization_gender(file_path: str) -> dict:
-    file_path = convert_to_mono_16k(file_path)  # Convert and resample
-    signal, sr = torchaudio.load(file_path)
+        # Embeddings
+        X_list: List[np.ndarray] = []
+        for chunk in chunks:
+            with torch.no_grad():
+                emb = diarization_model.encode_batch(chunk).squeeze().detach().cpu().numpy()
+            X_list.append(emb)
+        X = np.array(X_list)
 
-    if signal.shape[0] > 1:
-        signal = signal.mean(dim=0, keepdim=True)
-    if sr != 16000:
-        raise ValueError("Audio must be 16kHz.")
+        # Choose K
+        if len(X) == 1:
+            best_k = 1
+        else:
+            best_score = -1.0
+            best_k = 2
+            for k in range(2, min(len(X), 8) + 1):
+                kmeans = KMeans(n_clusters=k, random_state=0, n_init='auto').fit(X)
+                try:
+                    score = silhouette_score(X, kmeans.labels_)
+                except Exception:
+                    score = -1.0
+                if score > best_score:
+                    best_score = score
+                    best_k = k
 
-    chunk_len = int(sr * 1.0)
-    chunks = [signal[:, i:i + chunk_len] for i in range(0, signal.shape[1], chunk_len) if (i + chunk_len) <= signal.shape[1]]
+        kmeans = KMeans(n_clusters=best_k, random_state=0, n_init='auto').fit(X) if best_k > 1 else None
+        labels = kmeans.labels_ if kmeans is not None else np.zeros(len(X), dtype=int)
 
-    embeddings = []
-    timestamps = []
-    chunk_duration = chunk_len / sr
+        # Merge adjacent same-speaker chunks
+        merged = _merge_consecutive(labels, frame_spans)
 
-    for idx, chunk in enumerate(chunks):
-        emb = diarization_model.encode_batch(chunk).squeeze().detach().numpy()
-        embeddings.append(emb)
-        timestamps.append((idx * chunk_duration, (idx + 1) * chunk_duration))
+        segments: List[Dict[str, Any]] = []
+        for (speaker_label, start_frame, end_frame) in merged:
+            start_sec = round(start_frame / sr, 2)
+            end_sec = round(end_frame / sr, 2)
 
-    X = np.array(embeddings)
-    best_k = 2
-    best_score = -1
+            segment_tensor = signal[:, start_frame:end_frame]
+            seg_name = f"{uuid.uuid4().hex}.wav"
+            seg_path = os.path.join(segments_dir, seg_name)
 
-    for k in range(2, min(len(X), 8) + 1):
-        kmeans = KMeans(n_clusters=k, random_state=0).fit(X)
-        score = silhouette_score(X, kmeans.labels_)
-        if score > best_score:
-            best_score = score
-            best_k = k
+            sf.write(seg_path, segment_tensor.squeeze().cpu().numpy(), 16000)
 
-    kmeans = KMeans(n_clusters=best_k, random_state=0).fit(X)
-    labels = kmeans.labels_
+            segments.append({
+                "speaker": f"Speaker {speaker_label}",
+                "start": start_sec,
+                "end": end_sec,
+                "file_url": f"{public_base}/{seg_name}"
+            })
 
-    results = []
-    for label, chunk, (start, end) in zip(labels, chunks, timestamps):
-        gender = detect_gender(chunk)
-        results.append({
-            "speaker": f"Speaker {label}",
-            "gender": gender,
-            "start": round(start, 2),
-            "end": round(end, 2)
-        })
-
-    return {
-        "estimated_speakers": best_k,
-        "diarization_with_gender": results
-    }
-if __name__ == "__main__":
-    file_path = r"C:\Users\Dr Bia\Desktop\sample Repository\audio_2.mp3" #file
-    result = run_diarization_gender(file_path)
-    print(result)
-
-
+        return {"estimated_speakers": int(best_k), "segments": segments}
+    finally:
+        try:
+            if os.path.exists(converted):
+                os.remove(converted)
+        except Exception:
+            pass
