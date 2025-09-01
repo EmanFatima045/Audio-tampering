@@ -53,6 +53,7 @@ def init_db():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # Updated schema to store cases with ID and name as first two columns
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS cases (
@@ -60,12 +61,13 @@ def init_db():
                 name TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 metadata JSONB,
-                temporal_splices JSONB,
+                splice_points JSONB,
                 original_filename TEXT,
                 notes TEXT
             );
             """
         )
+        # Updated schema to store speaker segments with transcription, sentiment, and gender
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS case_speakers (
@@ -85,8 +87,8 @@ def init_db():
 
 init_db()
 
-# Transcription logic
-def transcribe_audio(file_bytes, filename):
+# Transcription logic (for explore functionalities - no database storage)
+def transcribe_audio_explore(file_bytes, filename):
     try:
         print("🔍 Transcription started...")
 
@@ -111,17 +113,41 @@ def transcribe_audio(file_bytes, filename):
         transcript_text = result["text"]
         print("📝 Transcription:", transcript_text)
 
-        # Store into PostgreSQL
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO transcription (audio_filename, transcription_text, created_at)
-            VALUES (%s, %s, %s)
-        """, (filename, transcript_text, datetime.now()))
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("Data stored in PostgreSQL.")
+        # Clean temp files
+        os.remove(original_path)
+        os.remove(cleaned_path)
+
+        return transcript_text
+
+    except Exception as e:
+        print(" Error:", str(e))
+        raise e
+
+# Transcription logic (for case creation - with database storage)
+def transcribe_audio_case(file_bytes, filename):
+    try:
+        print("🔍 Transcription started...")
+
+        temp_id = str(uuid.uuid4())
+        original_path = f"{temp_id}_orig.wav"
+        cleaned_path = f"{temp_id}_clean.wav"
+
+        # Save original audio
+        with open(original_path, "wb") as f:
+            f.write(file_bytes)
+        print(" Audio saved:", original_path)
+
+        # Preprocessing
+        audio, sr = librosa.load(original_path, sr=None, mono=True)
+        audio_resampled = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+        trimmed_audio, _ = librosa.effects.trim(audio_resampled, top_db=20)
+        reduced_noise = nr.reduce_noise(y=trimmed_audio, sr=16000)
+        sf.write(cleaned_path, reduced_noise, 16000)
+
+        # Whisper transcription
+        result = model.transcribe(cleaned_path)
+        transcript_text = result["text"]
+        print("📝 Transcription:", transcript_text)
 
         # Clean temp files
         os.remove(original_path)
@@ -133,25 +159,25 @@ def transcribe_audio(file_bytes, filename):
         print(" Error:", str(e))
         raise e
 
-# FastAPI route
+# FastAPI route for explore functionalities (no database storage)
 @app.post("/transcribe/")
 async def upload_audio(file: UploadFile = File(...)):
     file_bytes = await file.read()
-    transcription = transcribe_audio(file_bytes, file.filename)
+    transcription = transcribe_audio_explore(file_bytes, file.filename)
     return {
         "filename": file.filename,
         "transcription": transcription
     }
 
-def _insert_case(conn, case_id, name, metadata_obj, temporal_obj, original_filename, notes):
+def _insert_case(conn, case_id, name, metadata_obj, splice_points, original_filename, notes):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO cases (id, name, metadata, temporal_splices, original_filename, notes)
+        INSERT INTO cases (id, name, metadata, splice_points, original_filename, notes)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (case_id, name, json.dumps(metadata_obj) if metadata_obj is not None else None,
-         json.dumps(temporal_obj) if temporal_obj is not None else None,
+         json.dumps(splice_points) if splice_points is not None else None,
          original_filename, notes)
     )
     cur.close()
@@ -192,9 +218,9 @@ async def create_case(
         )
         metadata_obj = metadata_result.get("metadata") if isinstance(metadata_result, dict) else None
 
-        # Temporal analysis (use combined splices only)
+        # Temporal analysis - store only splice points (time, confidence, methods)
         bg_res, phase_res, combined_splices = analyze_audio_splices(temp_path)
-        temporal_obj = [
+        splice_points = [
             {"time": float(x.get("time")), "confidence": float(x.get("confidence")), "methods": x.get("methods", [])}
             for x in combined_splices
         ]
@@ -208,11 +234,11 @@ async def create_case(
         case_id = uuid.uuid4()
         conn = get_db_connection()
         try:
-            _insert_case(conn, case_id, name, metadata_obj, temporal_obj, file.filename, notes)
+            _insert_case(conn, case_id, name, metadata_obj, splice_points, file.filename, notes)
 
             if estimated <= 1:
                 # Whole-audio transcription/sentiment/gender
-                transcript_text = transcribe_audio(content, file.filename)
+                transcript_text = transcribe_audio_case(content, file.filename)
                 sentiment = get_sentiment(transcript_text)
                 gender = process_audio(temp_path).get("gender")
 
@@ -256,7 +282,7 @@ async def create_case(
                         if local_path and os.path.exists(local_path):
                             with open(local_path, "rb") as f:
                                 seg_bytes = f.read()
-                            seg_transcript = transcribe_audio(seg_bytes, os.path.basename(local_path))
+                            seg_transcript = transcribe_audio_case(seg_bytes, os.path.basename(local_path))
                             data["transcripts"].append(seg_transcript)
                             data["sentiments"].append(get_sentiment(seg_transcript))
                             # Optional: gender per segment; choose first non-null later
@@ -305,6 +331,6 @@ async def create_case(
 
 # Run the server (for manual execution)
 if __name__ == "__main__":
-    uvicorn.run("RealDatabase:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("RealDatabase:app", host="127.0.0.1", port=8001, reload=True)
 
 
